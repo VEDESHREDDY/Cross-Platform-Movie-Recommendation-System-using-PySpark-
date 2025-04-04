@@ -1,0 +1,73 @@
+from pyspark.sql import SparkSession 
+from pyspark.sql.functions import col, lit, lower 
+from pyspark.ml.feature import HashingTF, IDF, Tokenizer 
+from pyspark.ml.linalg import Vectors 
+import numpy as np 
+# Initialize Spark Session 
+spark = SparkSession.builder.appName("CrossPlatformMovieRecommendation").getOrCreate() 
+# Load datasets 
+netflix_df = spark.read.csv("data.csv", header=True, inferSchema=True) 
+amazon_df = spark.read.csv("titles.csv", header=True, inferSchema=True) 
+# Preprocess Netflix Dataset 
+netflix_df = netflix_df.select( 
+col("title"), 
+col("genres").alias("genre"), 
+col("imdbAverageRating").alias("rating"), 
+lit("No description available").alias("description")  # Default description 
+).withColumn("platform", lit("Netflix")) 
+# Preprocess Amazon Dataset 
+amazon_df = amazon_df.select( 
+col("title"), 
+col("genres").alias("genre"), 
+col("imdb_score").alias("rating"), 
+col("description") 
+).withColumn("platform", lit("Amazon Prime")) 
+# Combine and Harmonize Datasets 
+movies_df = netflix_df.union(amazon_df) 
+# Fill missing values 
+movies_df = movies_df.na.fill({"description": "", "rating": 0.0}) 
+# Tokenize the description column 
+tokenizer = Tokenizer(inputCol="description", outputCol="words") 
+# Filter movies based on user criteria 
+def filter_movies(genre, min_rating): 
+return movies_df.filter( 
+(lower(col("genre")).like(f"%{genre.lower()}%")) & (col("rating") >= min_rating) 
+) 
+# Feature Extraction using TF-IDF 
+hashing_tf = HashingTF(inputCol="words", outputCol="rawFeatures", numFeatures=100) 
+idf = IDF(inputCol="rawFeatures", outputCol="features") 
+def extract_features(filtered_movies_df): 
+tokenized_data = tokenizer.transform(filtered_movies_df) 
+featurized_data = hashing_tf.transform(tokenized_data) 
+idf_model = idf.fit(featurized_data) 
+return idf_model.transform(featurized_data) 
+# Recommendation System using Cosine Similarity 
+def cosine_similarity(vec1, vec2): 
+dot_product = float(vec1.dot(vec2)) 
+norm_a = np.linalg.norm(vec1.toArray()) 
+norm_b = np.linalg.norm(vec2.toArray()) 
+return dot_product / (norm_a * norm_b) 
+def recommend_movies(user_preference, rescaled_data, top_n=10): 
+recommendations = ( 
+rescaled_data.rdd.map( 
+lambda row: (row.title, row.platform, cosine_similarity(user_preference, row.features)) 
+) 
+.filter(lambda x: x[2] > 0)  # Exclude zero similarity 
+.sortBy(lambda x: x[2], ascending=False) 
+) 
+# Split recommendations evenly between platforms 
+netflix_recommendations = recommendations.filter(lambda x: x[1] == "Netflix").take(top_n // 2) 
+amazon_recommendations = recommendations.filter(lambda x: x[1] == "Amazon Prime").take(top_n // 2) 
+return netflix_recommendations + amazon_recommendations 
+# Interactive User Input 
+genre = input("Enter your preferred genre: ").strip() 
+min_rating = float(input("Enter your minimum rating (e.g., 4.0): ")) 
+user_preference_vector = Vectors.dense([0.1] * 100)  # Example preference vector 
+# Process and Recommend 
+filtered_movies_df = filter_movies(genre, min_rating) 
+rescaled_data = extract_features(filtered_movies_df) 
+recommendations = recommend_movies(user_preference_vector, rescaled_data) 
+# Display Recommendations 
+print("\nRecommended Movies:") 
+for title, platform, similarity in recommendations: 
+print(f"Title: {title} | Platform: {platform} | Similarity: {similarity:.4f}")
